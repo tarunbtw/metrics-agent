@@ -129,4 +129,4 @@ func (e *Exporter) prometheusFormat(s *collector.Snapshot) string {
 	b.WriteString(fmt.Sprintf("agent_uptime_seconds{%s} %.0f\n\n", labels, s.UptimeSeconds))
 
 	return b.String()
-.
+}
