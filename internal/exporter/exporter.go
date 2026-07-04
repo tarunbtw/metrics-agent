@@ -3,6 +3,7 @@ package exporter
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -11,18 +12,32 @@ import (
 	"github.com/tarunbtw/metrics-agent/internal/collector"
 )
 
+// SnapshotSource is satisfied by *collector.Collector and allows easy stubbing in tests.
+type SnapshotSource interface {
+	Latest() *collector.Snapshot
+}
+
+// Exporter writes Prometheus exposition format and JSON responses.
 type Exporter struct {
-	collector *collector.Collector
+	collector SnapshotSource
 	hostname  string
 	env       string
 }
 
-func New(c *collector.Collector) *Exporter {
+// New creates an Exporter that reads hostname from os.Hostname and env from
+// the ENV environment variable.
+func New(c SnapshotSource) *Exporter {
 	hostname, _ := os.Hostname()
 	env := os.Getenv("ENV")
 	if env == "" {
 		env = "development"
 	}
+	return NewWithOpts(c, hostname, env)
+}
+
+// NewWithOpts creates an Exporter with explicit hostname and env values.
+// Intended for use in tests.
+func NewWithOpts(c SnapshotSource, hostname, env string) *Exporter {
 	return &Exporter{
 		collector: c,
 		hostname:  hostname,
@@ -33,37 +48,45 @@ func New(c *collector.Collector) *Exporter {
 func (e *Exporter) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 	s := e.collector.Latest()
 	if s == nil {
+		slog.Warn("HandleMetrics: no snapshot available yet")
 		http.Error(w, "no data yet", http.StatusServiceUnavailable)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(e.prometheusFormat(s)))
+	w.Write([]byte(e.prometheusFormat(s))) //nolint:errcheck
 }
 
 func (e *Exporter) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
 	s := e.collector.Latest()
 	if s == nil {
+		slog.Warn("HandleSnapshot: no snapshot available yet")
 		http.Error(w, "no data yet", http.StatusServiceUnavailable)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s)
+	if err := json.NewEncoder(w).Encode(s); err != nil {
+		slog.Error("HandleSnapshot: encode error", "error", err)
+	}
 }
 
 func (e *Exporter) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"status":    "ok",
 		"timestamp": time.Now().UTC(),
 		"hostname":  e.hostname,
 		"env":       e.env,
-	})
+	}); err != nil {
+		slog.Error("HandleHealth: encode error", "error", err)
+	}
 }
 
 func (e *Exporter) prometheusFormat(s *collector.Snapshot) string {
-	labels := fmt.Sprintf(`hostname="%s",env="%s"`, e.hostname, e.env)
+	// Use %q for hostname and env so a double-quote in either value is escaped
+	// and cannot corrupt the Prometheus exposition format.
+	labels := fmt.Sprintf(`hostname=%q,env=%q`, e.hostname, e.env)
 	var b strings.Builder
 
 	// CPU
