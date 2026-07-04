@@ -36,6 +36,13 @@ func main() {
 	exp := exporter.New(c)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, "index.html")
+	})
 	mux.HandleFunc("/metrics", exp.HandleMetrics)
 	mux.HandleFunc("/snapshot", exp.HandleSnapshot)
 	mux.HandleFunc("/health", exp.HandleHealth)
