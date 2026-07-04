@@ -12,6 +12,7 @@ WORKDIR /app
 RUN adduser -D -u 10001 agent
 
 COPY --from=builder /app/agent .
+COPY --from=builder /app/index.html .
 
 EXPOSE 9100
 
