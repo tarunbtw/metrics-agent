@@ -1,7 +1,8 @@
 package main
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -12,7 +13,14 @@ import (
 )
 
 func main() {
-	log.SetOutput(os.Stdout)
+	// Configure slog: JSON output when LOG_FORMAT=json, text otherwise.
+	var handler slog.Handler
+	if os.Getenv("LOG_FORMAT") == "json" {
+		handler = slog.NewJSONHandler(os.Stdout, nil)
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, nil)
+	}
+	slog.SetDefault(slog.New(handler))
 
 	interval := scrapeInterval()
 	port := os.Getenv("PORT")
@@ -20,18 +28,63 @@ func main() {
 		port = "9100"
 	}
 
-	log.Printf("starting metrics agent on :%s, scrape interval: %v\n", port, interval)
+	slog.Info("starting metrics-agent", "port", port, "scrape_interval", interval)
 
 	c := collector.New(interval)
 	c.Start()
 
 	exp := exporter.New(c)
 
-	http.HandleFunc("/metrics", exp.HandleMetrics)
-	http.HandleFunc("/snapshot", exp.HandleSnapshot)
-	http.HandleFunc("/health", exp.HandleHealth)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", exp.HandleMetrics)
+	mux.HandleFunc("/snapshot", exp.HandleSnapshot)
+	mux.HandleFunc("/health", exp.HandleHealth)
 
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	// Run the server in a goroutine so we can listen for signals below.
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
+		close(serverErr)
+	}()
+
+	// Wait for a termination signal or a fatal server error.
+	ctx, stop := signal_notifyContext(context.Background())
+	defer stop()
+
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		slog.Info("shutdown signal received")
+	}
+
+	// Give in-flight requests up to 10 seconds to complete.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	slog.Info("shutting down HTTP server")
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("server shutdown error", "error", err)
+	}
+
+	slog.Info("stopping collector")
+	c.Stop()
+
+	slog.Info("shutdown complete")
 }
 
 func scrapeInterval() time.Duration {
